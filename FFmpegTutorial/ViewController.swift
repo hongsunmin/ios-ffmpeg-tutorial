@@ -13,25 +13,61 @@
 import UIKit
 import ffmpeg
 
+struct FFmpegTutorialEnv {
+    static var local = true
+}
+
+func printAVError(err: Int32) {
+    var errbuf = [CChar](repeating: 0, count: 1024)
+    av_strerror(err, &errbuf, 1024)
+    print("reason: \(String(cString: errbuf))")
+}
+
+public func av_check<T: Equatable>(_ label: String,
+                                   _ expression: @autoclosure () -> T,
+                                   comparison: (T, T) -> Bool,
+                                   comparisonValues: T) -> Bool
+{
+    let result = expression()
+    guard comparison(result, comparisonValues) else {
+        print("Comparing \(label) to \(comparisonValues) fails")
+        printAVError(err: result as! Int32)
+        return false
+    }
+    return true
+}
+
 class ViewController: UIViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
         // Do any additional setup after loading the view.
-        runTutorial(forResource: "sample", ofType: "mp4")
+        if FFmpegTutorialEnv.local {
+            runTutorial(forResource: "sample", ofType: "mp4")
+        } else {
+            // You can stream it at https://rtsp.stream
+            runTutorial(forResource: "")
+        }
     }
 }
 
 
 
 extension ViewController {
-    func runTutorial(forResource: String, ofType: String) -> Int {
-        var formatCtx: UnsafeMutablePointer<AVFormatContext>?
-        guard let samplePath = Bundle.main.path(forResource: forResource, ofType: ofType) else {
+    func runTutorial(forResource name: String, ofType: String) -> Int {
+        guard let samplePath = Bundle.main.path(forResource: name, ofType: ofType) else {
             return -1
         }
         
-        let url = samplePath.utf8CString.withUnsafeBufferPointer({ p in
+        return runTutorial(forResource: samplePath)
+    }
+    
+    func runTutorial(forResource name: String) -> Int {
+        av_log_set_level(AV_LOG_DEBUG)
+        
+        var formatCtx: UnsafeMutablePointer<AVFormatContext>?
+        let nameBytes = name.utf8CString
+        let url = nameBytes.withUnsafeBufferPointer({ p in
             let url: UnsafePointer<CChar> = p.cast()
             return url
         })
@@ -39,7 +75,10 @@ extension ViewController {
         avformat_network_init()
         
         // Open video file
-        guard avformat_open_input(&formatCtx, url, nil, nil) == 0,
+        guard av_check("avformat_open_input",
+                       avformat_open_input(&formatCtx, url, nil, nil),
+                       comparison: ==,
+                       comparisonValues: 0),
               let formatCtx = formatCtx else {
             return -1 // Couldn't open file
         }
@@ -49,7 +88,10 @@ extension ViewController {
         }
         
         // Retrieve stream information
-        if avformat_find_stream_info(formatCtx, nil) < 0 {
+        if av_check("avformat_find_stream_info",
+                    avformat_find_stream_info(formatCtx, nil),
+                    comparison: <,
+                    comparisonValues: 0) {
             return -1 // Couldn't find stream information
         }
         
@@ -88,7 +130,10 @@ extension ViewController {
         }
         
         // Open codec
-        if avcodec_open2(codecCtx, codec, nil) < 0 {
+        if av_check("avcodec_open2",
+                    avcodec_open2(codecCtx, codec, nil),
+                    comparison: <,
+                    comparisonValues: 0) {
             return -1 // Could not open codec
         }
         
@@ -136,64 +181,84 @@ extension ViewController {
         )
         
         var bsfCtx: UnsafeMutablePointer<AVBSFContext>?
-        let bsFilter = av_bsf_get_by_name("h264_mp4toannexb")
-        if av_bsf_alloc(bsFilter, &bsfCtx) != 0 {
-            return -1
+        if FFmpegTutorialEnv.local {
+            let bsFilter = av_bsf_get_by_name("h264_mp4toannexb")
+            if av_check("av_bsf_alloc",
+                        av_bsf_alloc(bsFilter, &bsfCtx),
+                        comparison: !=,
+                        comparisonValues: 0) {
+                return -1
+            }
+            
+            if av_check("avcodec_parameters_from_context",
+                        avcodec_parameters_from_context(bsfCtx?.pointee.par_in, codecCtx),
+                        comparison: <,
+                        comparisonValues: 0) {
+                return -1
+            }
+            
+            av_bsf_init(bsfCtx)
         }
         
-        if avcodec_parameters_from_context(bsfCtx?.pointee.par_in, codecCtx) < 0 {
-            return -1
-        }
-        
-        av_bsf_init(bsfCtx)
         defer {
             av_bsf_free(&bsfCtx)
         }
         
         var i = 0
+        let decoder = { (codecCtx, packet, frame) -> Int32 in
+            self.decode(codecCtx!, avpkt: &packet, frame: frame!) { frame in
+                // Did we get a video frame?
+                // Convert the image from its native format to RGB
+                let data = withUnsafeBytes(of: &frame.pointee.data.0) { $0 }
+                let srcSlice: UnsafePointer<UnsafePointer<UInt8>?> = data.cast()
+                let srcStride = withUnsafePointer(to: &frame.pointee.linesize.0) { $0 }
+                sws_scale(swsCtx, srcSlice.cast(), srcStride, 0, height, dstData, dstLinesize)
+                
+                // Save th frame to disk
+                i += 1
+                if i <= 5 {
+                    self.saveFrame(frame: frameRGB!, width: width, height: height, iFrame: i)
+                }
+            }
+        }
+        
         while av_read_frame(formatCtx, &packet) >= 0 {
             if packet.stream_index == videoSteram {
                 // Decode video frame
-                var result: Int32
-                result = av_bsf_send_packet(bsfCtx, &packet)
-                if result < 0 {
-                    print("av_bsf_send_packet error occurs.")
-                    printAVError(err: result)
-                    break
-                }
-                
-                while true {
-                    result = av_bsf_receive_packet(bsfCtx, &packet)
-                    if result == AVERROR_CONVERT(EAGAIN) {
-                        break
-                    } else if result == 0 {
-                        let decodeResult = decode(codecCtx!, avpkt: &packet, frame: frame!) { frame in
-                            // Did we get a video frame?
-                            // Convert the image from its native format to RGB
-                            let data = withUnsafeBytes(of: &frame.pointee.data.0) { $0 }
-                            let srcSlice: UnsafePointer<UnsafePointer<UInt8>?> = data.cast()
-                            let srcStride = withUnsafePointer(to: &frame.pointee.linesize.0) { $0 }
-                            sws_scale(swsCtx, srcSlice.cast(), srcStride, 0, height, dstData, dstLinesize)
-                            
-                            // Save th frame to disk
-                            i += 1
-                            if i <= 5 {
-                                saveFrame(frame: frameRGB!, width: width, height: height, iFrame: i)
-                            }
-                        }
-                        
-                        if decodeResult != 0 {
-                            print("decode error occures")
-                            printAVError(err: decodeResult)
-                        }
-                    } else {
-                        print("av_bsf_receive_packet error occurs.")
+                if FFmpegTutorialEnv.local {
+                    var result: Int32
+                    result = av_bsf_send_packet(bsfCtx, &packet)
+                    if result < 0 {
+                        print("av_bsf_send_packet error occurs.")
                         printAVError(err: result)
                         break
                     }
+                    
+                    while true {
+                        result = av_bsf_receive_packet(bsfCtx, &packet)
+                        if result == AVERROR_CONVERT(EAGAIN) {
+                            break
+                        } else if result == 0 {
+                            let decodeResult = decoder(codecCtx!, &packet, frame!)
+                            if decodeResult != 0 {
+                                print("decode error occures")
+                                printAVError(err: decodeResult)
+                            }
+                        } else {
+                            print("av_bsf_receive_packet error occurs.")
+                            printAVError(err: result)
+                            break
+                        }
+                    }
+                    
+                    av_packet_unref(&packet)
+                } else {
+                    let decodeResult = decoder(codecCtx!, &packet, frame!)
+                    if decodeResult != 0 {
+                        print("decode error occures")
+                        printAVError(err: decodeResult)
+                    }
                 }
-                
-                av_packet_unref(&packet)
             }
         }
         return 0
@@ -223,6 +288,7 @@ extension ViewController {
     func saveFrame(frame: UnsafeMutablePointer<AVFrame>, width: Int32, height: Int32, iFrame: Int) {
         let fileManager = FileManager.default
         let documentPath = fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        print("app document path: \(documentPath)")
         let directoryPath = documentPath.appendingPathComponent("images", isDirectory: true)
         let imagePath = directoryPath.appendingPathComponent("frame\(iFrame).ppm")
         do {
@@ -262,11 +328,5 @@ extension ViewController {
         } catch let e {
             print(e.localizedDescription)
         }
-    }
-    
-    func printAVError(err: Int32) {
-        var errbuf = [CChar](repeating: 0, count: 1024)
-        av_strerror(err, &errbuf, 1024)
-        print("reason: \(errbuf)")
     }
 }

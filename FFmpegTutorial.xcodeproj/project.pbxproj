@@ -866,6 +866,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 38C96JHCV7;
+				"EXCLUDED_ARCHS[sdk=iphonesimulator*]" = arm64;
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = "${SRCROOT}/FFmpegTutorial/Library/FFmpeg/include";
 				INFOPLIST_FILE = FFmpegTutorial/Info.plist;
