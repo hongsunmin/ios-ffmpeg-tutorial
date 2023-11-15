@@ -78,13 +78,16 @@ extension ViewController {
         guard av_check("avformat_open_input",
                        avformat_open_input(&formatCtx, url, nil, nil),
                        comparison: ==,
-                       comparisonValues: 0),
-              let formatCtx = formatCtx else {
+                       comparisonValues: 0) else {
             return -1 // Couldn't open file
         }
         
         defer {
-            avformat_free_context(formatCtx)
+            avformat_close_input(&formatCtx)
+        }
+        
+        guard let formatCtx = formatCtx else {
+            return -1 // Couldn't open file
         }
         
         // Retrieve stream information
@@ -114,19 +117,22 @@ extension ViewController {
             return -1 // Didn't find a video stream
         }
         
+        // Get a pointer to the codec parameters for the video stream
         guard let codecParameters = formatCtx.pointee.streams[videoSteram]?.pointee.codecpar else {
             return -1
         }
         
+        // Find the decoder for the video stream
         let codec = avcodec_find_decoder(codecParameters.pointee.codec_id)
         if codec == nil {
             print("Unsupported codec\n")
             return -1 // Codec not found
         }
         
-        let codecCtx = avcodec_alloc_context3(codec)
+        // Copy context
+        var codecCtx = avcodec_alloc_context3(codec)
         defer {
-            avcodec_close(codecCtx)
+            avcodec_free_context(&codecCtx)
         }
         
         // Open codec
@@ -179,6 +185,9 @@ extension ViewController {
             width, height, pixelFormat,
             width, height, AV_PIX_FMT_RGB24, SWS_BILINEAR, nil, nil, nil
         )
+        defer {
+            sws_freeContext(swsCtx)
+        }
         
         var bsfCtx: UnsafeMutablePointer<AVBSFContext>?
         if FFmpegTutorialEnv.local {
@@ -204,6 +213,7 @@ extension ViewController {
             av_bsf_free(&bsfCtx)
         }
         
+        // Read frames and save first five frames to disk
         var i = 0
         let decoder = { (codecCtx, packet, frame) -> Int32 in
             self.decode(codecCtx!, avpkt: &packet, frame: frame!) { frame in
@@ -223,6 +233,7 @@ extension ViewController {
         }
         
         while av_read_frame(formatCtx, &packet) >= 0 {
+            // Is this a packet from the video stream?
             if packet.stream_index == videoSteram {
                 // Decode video frame
                 if FFmpegTutorialEnv.local {
@@ -250,8 +261,6 @@ extension ViewController {
                             break
                         }
                     }
-                    
-                    av_packet_unref(&packet)
                 } else {
                     let decodeResult = decoder(codecCtx!, &packet, frame!)
                     if decodeResult != 0 {
@@ -259,7 +268,13 @@ extension ViewController {
                         printAVError(err: decodeResult)
                     }
                 }
+                
+                // Free the packet that was allocated by av_read_frame
+                av_packet_unref(&packet)
             }
+            
+            // Free the packet that was allocated by av_read_frame < 0
+            av_packet_unref(&packet)
         }
         return 0
     }
