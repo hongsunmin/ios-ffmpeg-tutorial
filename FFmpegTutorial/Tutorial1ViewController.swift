@@ -1,5 +1,5 @@
 //
-//  ViewController.swift
+//  Tutorial1ViewController.swift
 //  FFmpegTutorial
 //
 //  Created by 201510003 on 2023/08/04.
@@ -37,7 +37,7 @@ public func av_check<T: Equatable>(_ label: String,
     return true
 }
 
-class ViewController: UIViewController {
+class Tutorial1ViewController: UIViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -53,7 +53,8 @@ class ViewController: UIViewController {
 
 
 
-extension ViewController {
+private extension Tutorial1ViewController {
+    
     func runTutorial(forResource name: String, ofType: String) -> Int {
         guard let samplePath = Bundle.main.path(forResource: name, ofType: ofType) else {
             return -1
